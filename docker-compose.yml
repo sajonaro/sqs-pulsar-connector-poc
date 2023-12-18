@@ -1,0 +1,99 @@
+version: '3.5'
+
+networks:
+  pulsar-net:
+    driver: bridge
+    ipam:
+     config:
+       - subnet: 10.10.0.0/16
+         gateway: 10.10.0.1 
+        
+
+volumes:
+  zookeeperdata:
+    driver: local
+  bookkeeperdata:
+    driver: local
+  pulsar-manager-data:
+    driver: local
+  sink-db:
+    driver: local  
+
+services:
+
+  localstack:
+    image: localstack/localstack:1.0.4
+    hostname: localstack
+    networks:
+      pulsar-net:
+        ipv4_address: 10.10.0.2 
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: sqs:4566
+      HOSTNAME: localstack
+      HOSTNAME_EXTERNAL: localstack
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: user
+      AWS_SECRET_ACCESS_KEY: password
+
+  aws-cli:
+    image: amazon/aws-cli
+    networks:
+      pulsar-net:
+        ipv4_address: 10.10.0.3 
+    depends_on:
+      localstack:
+        condition: service_healthy
+    volumes:
+      - ./sqs-setup:/aws
+    environment:
+      - AWS_ACCESS_KEY_ID=user
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_DEFAULT_REGION=us-east-1
+    entrypoint: /bin/sh -c
+    command: >
+      "
+        aws --endpoint-url=http://localstack:4566 sqs create-queue --queue-name localstack-queue
+        aws --endpoint-url=http://localstack:4566 sqs list-queues
+
+        aws --endpoint-url=http://localstack:4566 sqs send-message --queue-url http://localstack:4566/000000000000/localstack-queue --message-body "test"
+        aws --endpoint-url=http://localstack:4566 sqs receive-message --queue-url http://localstack:4566/000000000000/localstack-queue
+        
+        aws --endpoint-url=http://localstack:4566 sqs send-message --queue-url http://localstack:4566/000000000000/localstack-queue --message-body "uno"
+        aws --endpoint-url=http://localstack:4566 sqs send-message --queue-url http://localstack:4566/000000000000/localstack-queue --message-body "dos"
+        aws --endpoint-url=http://localstack:4566 sqs send-message --queue-url http://localstack:4566/000000000000/localstack-queue --message-body "tres"
+        aws --endpoint-url=http://localstack:4566 sqs send-message --queue-url http://localstack:4566/000000000000/localstack-queue --message-body "cuatro"
+   
+      "
+
+  # Start broker
+  pulsar-server:
+    image: apachepulsar/pulsar-all:3.1.1
+    container_name: pulsar-server
+    hostname: pulsar-server
+    volumes:
+      - ./sqs-source-java/target/sqs-source-connector-0.0.1.jar:/pulsar/connectors/sqs-source-connector-0.0.1.jar
+      - ./sqs-source-java/source-config.yaml:/pulsar/conf/source-config.yaml
+    ports:
+    - 8080:8080
+    - 6650:6650
+    networks:
+      pulsar-net:
+        ipv4_address: 10.10.0.4 
+    healthcheck:
+      interval: 10s
+      retries: 20
+      test: curl --write-out 'HTTP %{http_code}' --fail --silent --output /dev/null http://localhost:8080/admin/v2/clusters/standalone
+    environment:
+      - advertisedAddress=pulsar-server
+      - webServicePort=8080
+      - webServiceHost=pulsar-server
+      - brokerServicePort=6650
+      - webServiceEnabled=true
+      - advertisedListeners=external:pulsar://pulsar-server:6650
+      - PULSAR_MEM=-Xms512m -Xmx512m -XX:MaxDirectMemorySize=256m
+      - functionsWorkerEnabled=true 
+      - authorizationAllowAnonymous=true
+    command: bash -c "bin/apply-config-from-env.py conf/standalone.conf && exec bin/pulsar standalone "
+
